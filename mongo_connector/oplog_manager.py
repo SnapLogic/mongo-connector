@@ -243,6 +243,13 @@ class OplogThread(threading.Thread):
                         # Sync the current oplog operation
                         operation = entry['op']
                         ns = entry['ns']
+                        doc = entry.get('o')
+
+                        #pre-process doc
+                        # Version 3.6 of mongodb includes a $v, see https://jira.mongodb.org/browse/SERVER-32240
+                        if doc:
+                            doc.pop('$v', None)
+
                         timestamp = util.bson_ts_to_long(entry['ts'])
                         for docman in self.doc_managers:
                             try:
@@ -252,14 +259,11 @@ class OplogThread(threading.Thread):
                                 # Remove
                                 if operation == 'd':
                                     docman.remove(
-                                        entry['o']['_id'], ns, timestamp)
+                                        doc['_id'], ns, timestamp)
                                     remove_inc += 1
 
                                 # Insert
                                 elif operation == 'i':  # Insert
-                                    # Retrieve inserted document from
-                                    # 'o' field in oplog record
-                                    doc = entry.get('o')
                                     # Extract timestamp and namespace
                                     if is_gridfs_file:
                                         db, coll = ns.split('.', 1)
@@ -275,14 +279,13 @@ class OplogThread(threading.Thread):
                                 # Update
                                 elif operation == 'u':
                                     docman.update(entry['o2']['_id'],
-                                                  entry['o'],
+                                                  doc,
                                                   ns, timestamp)
                                     update_inc += 1
 
                                 # Command
                                 elif operation == 'c':
                                     # use unmapped namespace
-                                    doc = entry.get('o')
                                     docman.handle_command(doc,
                                                           entry['ns'],
                                                           timestamp)
