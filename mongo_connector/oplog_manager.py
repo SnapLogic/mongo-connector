@@ -24,10 +24,10 @@ except ImportError:
 import sys
 import time
 import threading
-
+import redis
 import pymongo
-
-from pymongo import CursorType, errors as pymongo_errors
+from pymongo import CursorType
+from dateutil import parser
 
 from mongo_connector import errors, util
 from mongo_connector.constants import DEFAULT_BATCH_SIZE
@@ -123,6 +123,10 @@ class OplogThread(threading.Thread):
         self.replset_name = (
             self.primary_client.admin.command('ismaster')['setName'])
 
+        self.r = redis.StrictRedis()
+
+        self.record_expire = 1000 * 60 * 10
+
         if not self.oplog.find_one():
             err_msg = 'OplogThread: No oplog for thread:'
             LOG.warning('%s %s' % (err_msg, self.primary_client))
@@ -181,6 +185,7 @@ class OplogThread(threading.Thread):
             return True, False
 
         # Update the namespace.
+        entry['old_ns'] = entry['ns']
         entry['ns'] = namespace.dest_name
 
         # Take fields out of the oplog entry that shouldn't be replicated.
@@ -274,10 +279,31 @@ class OplogThread(threading.Thread):
 
                                 # Update
                                 elif operation == 'u':
-                                    docman.update(entry['o2']['_id'],
-                                                  entry['o'],
-                                                  ns, timestamp)
-                                    update_inc += 1
+
+                                    # get Latest Entry
+                                    old_ns = entry['old_ns']
+                                    doc_id = entry['o2']['_id']
+                                    doc_lookup = self.get_collection(old_ns).find_one({'_id': doc_id})
+
+                                    if not doc_lookup:
+                                        docman.update(entry['o2']['_id'], entry['o'], ns, timestamp)
+                                        update_inc += 1
+                                    else:
+                                        doc_ts = doc_lookup.get('time_stamp')
+                                        key = ns + ':' + doc_id
+                                        last_update_timestamp = self.r.get(key)
+
+                                        LOG.info("Doc %s timestamp %s from collection '%s' last updated at %s",
+                                                 doc_id, doc_lookup.get('time_stamp'), ns, last_update_timestamp)
+
+                                        if last_update_timestamp and doc_ts <= parser.parse(last_update_timestamp):
+                                            LOG.info("Skipping Update : Doc %s timestamp %s from collection '%s'",
+                                                     doc_id, doc_lookup.get('time_stamp'), ns)
+                                        else:
+                                            docman.update(entry['o2']['_id'], doc_lookup, ns, timestamp)
+                                            self.r.setex(key, self.record_expire, doc_ts)
+                                            LOG.info("Updating Doc %s timestamp %s", key, doc_ts)
+                                            update_inc += 1
 
                                 # Command
                                 elif operation == 'c':
@@ -483,6 +509,8 @@ class OplogThread(threading.Thread):
                 query,
                 cursor_type=CursorType.TAILABLE_AWAIT,
                 oplog_replay=True)
+
+        cursor.batch_size(100000)
         return cursor
 
     def get_collection(self, namespace):
@@ -560,6 +588,7 @@ class OplogThread(threading.Thread):
                         sort=[("_id", pymongo.ASCENDING)]
                     )
                 try:
+                    cursor.batch_size(100000)
                     for doc in cursor:
                         if not self.running:
                             # Thread was joined while performing the

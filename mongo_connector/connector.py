@@ -28,8 +28,10 @@ import ssl
 import sys
 import threading
 import time
+import redis
 
 from pymongo import MongoClient
+from redis import ConnectionError
 
 from mongo_connector import config, constants, errors, util
 from mongo_connector.constants import __version__
@@ -459,6 +461,9 @@ class Connector(threading.Thread):
         LOG.info('MongoConnector: Stopping all OplogThreads')
         for thread in self.shard_set.values():
             thread.join()
+
+
+        # Stop Redis Server
 
 
 def get_config_options():
@@ -1260,6 +1265,13 @@ def log_startup_info():
             'outside of Python\'s datetime limit.', pymongo.__version__)
 
 
+def redisLocalhostLive():
+    redis_test = redis.StrictRedis()# non-default ports could go here
+    try:
+        return redis_test.ping()
+    except ConnectionError:
+        return False
+
 @log_fatal_exceptions
 def main():
     """ Starts the mongo connector (assuming CLI)
@@ -1293,6 +1305,12 @@ def main():
         return sig_handler
     signal.signal(signal.SIGTERM, signame_handler('SIGTERM'))
     signal.signal(signal.SIGINT, signame_handler('SIGINT'))
+
+    #Start Redis Server
+
+    if not redisLocalhostLive():
+        raise errors.ConnectionFailed(
+            "Cannot connect to Redis Server, please check if redis-server is up and running on localhost ")
 
     connector.start()
 
